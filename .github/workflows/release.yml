@@ -19,7 +19,7 @@ jobs:
     name: Check Version
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Tag matches Cargo.toml
         env:
           TAG: ${{ github.ref_name }}
@@ -51,7 +51,7 @@ jobs:
             runner: ubuntu-24.04-arm
             run_check: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
