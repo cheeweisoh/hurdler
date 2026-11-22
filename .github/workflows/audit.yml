@@ -1,0 +1,35 @@
+name: Audit
+
+on:
+  schedule:
+    - cron: "0 0 * * 1"
+  push:
+    branches: [main]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "deny.toml"
+  pull_request:
+    branches: ["main"]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "deny.toml"
+
+permissions:
+  contents: read
+
+jobs:
+  advisories:
+    name: Security Advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      - name: Check Advisories, Licenses, Bans, and Sources
+        run: cargo deny check
