@@ -114,3 +114,88 @@ jobs:
             --title "hurdler $TAG" \
             --generate-notes \
             $prerelease
+
+  tap:
+    name: Update Homebrew Tap
+    needs: release
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Tap
+        uses: actions/checkout@v7
+        with:
+          repository: cheeweisoh/homebrew-tap
+          token: ${{ secrets.TAP_TOKEN }}
+
+      - name: Download Checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: gh release download "$TAG" --repo "$REPO" --pattern '*.sha256' --dir sums
+
+      - name: Write Formula
+        env:
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          base="https://github.com/$REPO/releases/download/$TAG"
+          sum() { awk '{print $1}' "sums/hurdler-$1.tar.gz.sha256"; }
+          mkdir -p Formula
+          cat > Formula/hurdler.rb <<EOF
+          class Hurdler < Formula
+            desc "Terminal User Interface for Jira"
+            homepage "https://github.com/$REPO"
+            version "$version"
+            license "MIT"
+
+            on_macos do
+              on_arm do
+                url "$base/hurdler-aarch64-apple-darwin.tar.gz"
+                sha256 "$(sum aarch64-apple-darwin)"
+              end
+              on_intel do
+                url "$base/hurdler-x86_64-apple-darwin.tar.gz"
+                sha256 "$(sum x86_64-apple-darwin)"
+              end
+            end
+
+            on_linux do
+              on_arm do
+                url "$base/hurdler-aarch64-unknown-linux-musl.tar.gz"
+                sha256 "$(sum aarch64-unknown-linux-musl)"
+              end
+              on_intel do
+                url "$base/hurdler-x86_64-unknown-linux-musl.tar.gz"
+                sha256 "$(sum x86_64-unknown-linux-musl)"
+              end
+            end
+
+            def install
+              bin.install "hurdler"
+            end
+
+            test do
+              assert_match version.to_s, shell_output("#{bin}/hurdler --version")
+            end
+          end
+          EOF
+          rm -rf sums
+
+      - name: Commit
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet Formula/hurdler.rb; then
+            echo "Formula already at ${TAG#v}"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/hurdler.rb
+          git commit -m "hurdler ${TAG#v}"
+          git pull --rebase
+          git push
