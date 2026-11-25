@@ -1,0 +1,56 @@
+name: Feature Request
+description: Suggest a new feature or an improvement
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Give the issue a title that describes the **outcome**, starting with a verb,
+        e.g. "Show an issue's comments in the inspector".
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do, and why is it hard or impossible today?
+      placeholder: |
+        To read the discussion on an issue I have to press `o` and open it in the
+        browser, so I leave hurdler for most issues I inspect.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What should hurdler do? Keys, config, what it looks like, Jira endpoints if known.
+      placeholder: |
+        - When the inspector opens an issue, fetch its comments in the background
+        - Show them below the description: author, relative time, Markdown body
+        - Cache them per issue; `r` refetches
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: How will we know it's done? Each checkbox shows as progress on the issue and the project board.
+      value: |
+        - [ ]
+        - [ ]
+        - [ ]
+    validations:
+      required: true
+
+  - type: textarea
+    id: out-of-scope
+    attributes:
+      label: Out of scope
+      description: Related ideas this issue deliberately doesn't cover (open separate issues for them).
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other ways to solve the problem, or the workaround you use today.

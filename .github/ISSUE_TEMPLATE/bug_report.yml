@@ -1,0 +1,92 @@
+name: Bug Report
+description: Something in hurdler doesn't work as expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug! Give it a title that describes the **symptom**,
+        e.g. "Wrapping from the first issue to the last doesn't load more issues".
+
+        **Don't paste API tokens, emails or private Jira URLs.**
+        Security problems: use the private "Security vulnerability" link instead.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead.
+      placeholder: |
+        Pressing `k` on the first issue wraps the cursor to the last loaded issue,
+        but no further page is loaded. The title keeps showing `Issues (50+)`.
+
+        Expected: reaching the end of the list by wrapping should load the next
+        page, the same as moving down with `j`.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Set `page_size = 10` in config.toml, with a JQL matching more issues
+        2. Start hurdler; the first issue is selected
+        3. Press `k`
+        4. The cursor wraps to issue 10, but "loading more…" never appears
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: hurdler version
+      description: Output of `hurdler --version` (or the commit, if built from `main`)
+      placeholder: hurdler 0.2.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+        - Linux (x86-64)
+        - Linux (ARM)
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: How did you install it?
+      options:
+        - Homebrew
+        - Release download
+        - cargo install
+        - Built from source
+    validations:
+      required: true
+
+  - type: input
+    id: terminal
+    attributes:
+      label: Terminal
+      description: Terminal app, and font if it's a display problem
+      placeholder: Ghostty, iTerm2, WezTerm, Alacritty, …
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Error messages
+      description: Any error shown in hurdler's notice, or printed when it exits.
+      render: text
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Anything else, such as a suspected cause or ideas for a fix.
