@@ -100,7 +100,7 @@ impl<T> StatefulTable<T> {
             return;
         }
         let i = match self.state.selected() {
-            Some(i) => (i + 1) % self.items.len(),
+            Some(i) => (i + 1).min(self.items.len() - 1),
             None => 0,
         };
         self.state.select(Some(i));
@@ -111,8 +111,8 @@ impl<T> StatefulTable<T> {
             return;
         }
         let i = match self.state.selected() {
-            Some(0) | None => self.items.len() - 1,
-            Some(i) => i - 1,
+            Some(i) => i.saturating_sub(1),
+            None => 0,
         };
         self.state.select(Some(i));
     }
@@ -1620,27 +1620,22 @@ mod tests {
     }
 
     #[test]
-    fn table_navigation_wraps_around() {
+    fn table_navigation_stops_at_both_ends() {
         let mut table = StatefulTable::new(vec!["a", "b", "c"]);
         assert_eq!(table.state.selected(), Some(0));
 
+        // no wrap at the top: k on the first row must not land near the end,
+        // where it would look like the next page should be loading
         table.prev();
-        assert_eq!(
-            table.state.selected(),
-            Some(2),
-            "the top wraps to the bottom"
-        );
-
-        table.next();
-        assert_eq!(
-            table.state.selected(),
-            Some(0),
-            "the bottom wraps to the top"
-        );
+        assert_eq!(table.state.selected(), Some(0), "the top holds");
 
         table.next();
         table.next();
         assert_eq!(table.state.selected(), Some(2));
+
+        // nor at the bottom - staying put is what re-triggers load_more_if_needed
+        table.next();
+        assert_eq!(table.state.selected(), Some(2), "the bottom holds");
 
         table.first();
         assert_eq!(table.state.selected(), Some(0));
