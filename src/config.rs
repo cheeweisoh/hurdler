@@ -83,6 +83,14 @@ impl Config {
         write_private(path, &body)
     }
 
+    pub fn save_queries(path: &Path, queries: &[JqlQuery]) -> Result<(), String> {
+        let mut on_disk = Self::read(path).map_err(|e| e.to_string())?;
+        on_disk.queries = queries.to_vec();
+        on_disk
+            .save(path)
+            .map_err(|e| format!("Couldn't save queries: {e}"))
+    }
+
     pub fn load(override_path: Option<&Path>) -> Result<Self, ConfigError> {
         let path = config_path(override_path);
         let mut config = Self::read(&path)?;
@@ -375,6 +383,49 @@ mod tests {
         assert!(text.contains("***"), "{text}");
         // the fields that are safe to log still show up
         assert!(text.contains("maple@maplesyrup.example"), "{text}");
+    }
+
+    #[test]
+    fn saving_queries_keeps_env_tokens_off_disk() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("maple.toml");
+        // the file deliberately has no api_token: it comes from JIRA_API_TOKEN
+        fs::write(
+            &path,
+            "base_url = \"https://maple.atlassian.net\"\nemail = \"maple@maple.example\"\n",
+        )
+        .expect("write config");
+
+        // the in-memory config the app runs with does hold the env token
+        let mut live = Config::read(&path).expect("read config");
+        live.apply_env(|name| (name == "JIRA_API_TOKEN").then(|| "maple-env-token".into()));
+        assert_eq!(live.api_token, "maple-env-token");
+
+        Config::save_queries(
+            &path,
+            &[JqlQuery {
+                name: "mine".into(),
+                jql: "assignee = currentUser()".into(),
+            }],
+        )
+        .expect("save queries");
+
+        let text = fs::read_to_string(&path).expect("reread config");
+        assert!(!text.contains("maple-env-token"), "{text}");
+        assert!(!text.contains("api_token"), "{text}");
+
+        // and the queries plus the rest of the file survived the round trip
+        let saved = Config::read(&path).expect("reparse config");
+        assert_eq!(
+            saved.queries,
+            [JqlQuery {
+                name: "mine".into(),
+                jql: "assignee = currentUser()".into(),
+            }]
+        );
+        assert_eq!(saved.base_url, "https://maple.atlassian.net");
+        assert_eq!(saved.email, "maple@maple.example");
+        assert_eq!(saved.api_token, "");
     }
 
     #[test]

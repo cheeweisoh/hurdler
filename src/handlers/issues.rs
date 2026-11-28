@@ -159,10 +159,7 @@ mod tests {
 
         // the pair opens the dialog, which is the only thing that can delete
         press(&mut app, 'd');
-        assert_eq!(
-            app.confirm_delete.as_ref().map(|d| d.key.as_str()),
-            Some("MAPLE-1")
-        );
+        assert_eq!(app.pending_delete_key(), Some("MAPLE-1"));
         assert_eq!(app.issues.items.len(), 2, "the dialog deletes nothing yet");
 
         // d-j-d is not dd

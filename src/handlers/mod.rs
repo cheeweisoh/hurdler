@@ -37,6 +37,7 @@ pub(crate) fn handle_key(
 
     let typing = app.editing.is_some()
         || app.search_editing()
+        || app.query_form_typing()
         || app.picker.as_ref().is_some_and(|picker| picker.searching);
 
     if key.code == KeyCode::Char('q') && !typing {
@@ -196,6 +197,14 @@ mod tests {
         assert!(app.query_menu.is_some());
         press(&mut app, KeyCode::Esc);
         assert!(app.query_menu.is_none(), "the next Esc reaches the menu");
+
+        // in a form field, ? is a character
+        app.open_query_menu();
+        app.start_query_form(false);
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('?'));
+        assert!(!app.show_help);
+        assert_eq!(app.form().name.buffer, "?");
     }
 
     #[tokio::test]

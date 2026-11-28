@@ -52,14 +52,14 @@ async fn start(terminal: &mut DefaultTerminal, cli: Cli) -> anyhow::Result<Optio
     }
 
     let config = match Config::load(override_path) {
-        Err(ConfigError::Missing(_)) => match run_setup(terminal, path).await? {
+        Err(ConfigError::Missing(_)) => match run_setup(terminal, path.clone()).await? {
             SetupOutcome::Saved => Config::load(override_path)?,
             SetupOutcome::Cancelled => return Ok(None),
         },
         other => other?,
     };
 
-    run(terminal, config).await?;
+    run(terminal, config, path).await?;
     Ok(None)
 }
 
@@ -106,10 +106,15 @@ async fn run_setup(terminal: &mut DefaultTerminal, path: PathBuf) -> anyhow::Res
     Ok(state.outcome.unwrap_or(SetupOutcome::Cancelled))
 }
 
-async fn run(terminal: &mut DefaultTerminal, config: Config) -> anyhow::Result<()> {
+async fn run(
+    terminal: &mut DefaultTerminal,
+    config: Config,
+    config_path: PathBuf,
+) -> anyhow::Result<()> {
     let mut app = App::new();
     app.account = config.email.clone();
     app.queries = config.queries.clone();
+    app.config_path = config_path;
 
     let editor = config.editor.clone();
     let client = JiraClient::new(config);
@@ -170,6 +175,9 @@ async fn run(terminal: &mut DefaultTerminal, config: Config) -> anyhow::Result<(
                 message,
                 generation,
             } => app.fail_more(message, generation),
+            Event::QueryCheckFailed { name, message } => {
+                app.set_notice(Notice::Error(format!("{name}: {message}")))
+            }
             Event::PickerOptionsFetched { field, options } => {
                 app.set_picker_options(field, options)
             }

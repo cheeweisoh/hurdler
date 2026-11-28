@@ -34,6 +34,10 @@ pub enum Event {
         message: String,
         generation: u64,
     },
+    QueryCheckFailed {
+        name: String,
+        message: String,
+    },
     PickerOptionsFetched {
         field: FieldId,
         options: Vec<PickerOption>,

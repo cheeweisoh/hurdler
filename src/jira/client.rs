@@ -122,6 +122,16 @@ impl JiraClient {
         self.search_page(jql, None).await.map(|page| page.issues)
     }
 
+    pub async fn check_jql(&self, jql: &str) -> Result<()> {
+        let body = json!({ "jql": jql, "maxResults": 1 });
+        self.send(
+            self.request(Method::POST, "/rest/api/3/search/jql")
+                .json(&body),
+        )
+        .await
+        .map(|_| ())
+    }
+
     pub async fn issue(&self, key: &str) -> Result<Issue> {
         let raw: RawIssue = self
             .fetch(
