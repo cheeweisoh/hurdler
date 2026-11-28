@@ -1,6 +1,6 @@
 use std::{
     env, error, fmt, fs,
-    io::ErrorKind,
+    io::{self, ErrorKind, Write},
     path::{Path, PathBuf},
 };
 
@@ -69,6 +69,14 @@ impl Config {
         Ok(config)
     }
 
+    pub fn save(&self, path: &Path) -> io::Result<()> {
+        let body = toml::to_string_pretty(self).map_err(io::Error::other)?;
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        write_private(path, &body)
+    }
+
     pub fn load(override_path: Option<&Path>) -> Result<Self, ConfigError> {
         let path = config_path(override_path);
         let mut config = Self::read(&path)?;
@@ -130,6 +138,27 @@ pub fn config_path(override_path: Option<&Path>) -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".config"));
     base.join("hurdler").join("config.toml")
+}
+
+fn write_private(path: &Path, text: &str) -> io::Result<()> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+
+    let mut file = options.open(path)?;
+    file.write_all(text.as_bytes())?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
 }
 
 #[derive(Debug)]

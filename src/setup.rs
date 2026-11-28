@@ -1,8 +1,4 @@
-use std::{
-    fs,
-    io::{self, Write},
-    path::{Path, PathBuf},
-};
+use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc::UnboundedSender;
@@ -145,34 +141,9 @@ impl Setup {
 
     pub fn save(&self) -> Result<(), String> {
         self.validate_for_save()?;
-
-        let body = toml::to_string_pretty(&self.draft).map_err(|e| e.to_string())?;
-
-        if let Some(dir) = self.path.parent() {
-            fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-        }
-        Self::write_private(&self.path, &body).map_err(|e| format!("couldn't save: {e}"))
-    }
-
-    fn write_private(path: &Path, text: &str) -> io::Result<()> {
-        let mut options = fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-
-        let mut file = options.open(path)?;
-        file.write_all(text.as_bytes())?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-        }
-        Ok(())
+        self.draft
+            .save(&self.path)
+            .map_err(|e| format!("Couldn't save: {e}"))
     }
 }
 
@@ -226,6 +197,8 @@ fn handle_editing_key(setup: &mut Setup, key: KeyEvent) {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
 
     use tokio::sync::mpsc;
@@ -345,7 +318,7 @@ mod tests {
         // the file holds an API token, so it must not be group or world readable
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
+            use std::{fs, os::unix::fs::PermissionsExt};
             let mode = fs::metadata(&path).expect("metadata").permissions().mode();
             assert_eq!(mode & 0o777, 0o600, "got {:o}", mode & 0o777);
         }
@@ -354,7 +327,7 @@ mod tests {
         s.save().expect("an overwrite saves");
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
+            use std::{fs, os::unix::fs::PermissionsExt};
             let mode = fs::metadata(&path).expect("metadata").permissions().mode();
             assert_eq!(mode & 0o777, 0o600, "got {:o}", mode & 0o777);
         }
