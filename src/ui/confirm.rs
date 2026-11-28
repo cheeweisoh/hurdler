@@ -6,7 +6,11 @@ use ratatui::{
     widgets::{Padding, Paragraph},
 };
 
-use crate::{app::App, theme::THEME, ui::helpers};
+use crate::{
+    app::{App, DeleteTarget},
+    theme::THEME,
+    ui::helpers,
+};
 
 fn button(text: &str, focused: bool, accent: Color) -> Span<'static> {
     let label = format!("  {text}  ");
@@ -27,12 +31,22 @@ pub(super) fn render_confirm(frame: &mut Frame, area: Rect, app: &App) {
         helpers::centered(area, Constraint::Length(52), Constraint::Length(11)),
     );
 
-    let block = helpers::pane_block("Delete issue", true).padding(Padding::new(2, 2, 1, 1));
+    let (title, name) = match &dialog.target {
+        DeleteTarget::Issue(key) => ("Delete issue", key.clone()),
+        DeleteTarget::Query(i) => (
+            "Delete query",
+            app.queries
+                .get(*i)
+                .map_or_else(String::new, |q| q.name.clone()),
+        ),
+    };
+
+    let block = helpers::pane_block(title, true).padding(Padding::new(2, 2, 1, 1));
 
     let lines = vec![
         Line::from(vec![
             Span::styled("Delete ", Style::new().fg(THEME.text)),
-            Span::styled(dialog.key.clone(), Style::new().fg(THEME.accent).bold()),
+            Span::styled(name, Style::new().fg(THEME.accent).bold()),
             Span::styled("?", Style::new().fg(THEME.text)),
         ])
         .centered(),

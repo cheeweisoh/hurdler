@@ -1,8 +1,4 @@
-use std::{
-    fs,
-    io::{self, Write},
-    path::{Path, PathBuf},
-};
+use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc::UnboundedSender;
@@ -14,16 +10,14 @@ pub enum SetupField {
     BaseUrl,
     Email,
     Token,
-    Jql,
     Editor,
 }
 
 impl SetupField {
-    pub const ALL: [SetupField; 5] = [
+    pub const ALL: [SetupField; 4] = [
         SetupField::BaseUrl,
         SetupField::Email,
         SetupField::Token,
-        SetupField::Jql,
         SetupField::Editor,
     ];
 
@@ -32,7 +26,6 @@ impl SetupField {
             SetupField::BaseUrl => "Jira URL",
             SetupField::Email => "Email",
             SetupField::Token => "API Token",
-            SetupField::Jql => "Default JQL",
             SetupField::Editor => "Editor",
         }
     }
@@ -67,7 +60,6 @@ impl Setup {
             SetupField::BaseUrl => self.draft.base_url.clone(),
             SetupField::Email => self.draft.email.clone(),
             SetupField::Token => self.draft.api_token.clone(),
-            SetupField::Jql => self.draft.jql.clone(),
             SetupField::Editor => self.draft.editor.clone().unwrap_or_default(),
         }
     }
@@ -79,7 +71,6 @@ impl Setup {
             }
             SetupField::Email => self.draft.email = text.trim().to_string(),
             SetupField::Token => self.draft.api_token = text.trim().to_string(),
-            SetupField::Jql => self.draft.jql = text,
             SetupField::Editor => self.draft.editor = (!text.trim().is_empty()).then_some(text),
         }
     }
@@ -145,34 +136,9 @@ impl Setup {
 
     pub fn save(&self) -> Result<(), String> {
         self.validate_for_save()?;
-
-        let body = toml::to_string_pretty(&self.draft).map_err(|e| e.to_string())?;
-
-        if let Some(dir) = self.path.parent() {
-            fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-        }
-        Self::write_private(&self.path, &body).map_err(|e| format!("couldn't save: {e}"))
-    }
-
-    fn write_private(path: &Path, text: &str) -> io::Result<()> {
-        let mut options = fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-
-        let mut file = options.open(path)?;
-        file.write_all(text.as_bytes())?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-        }
-        Ok(())
+        self.draft
+            .save(&self.path)
+            .map_err(|e| format!("Couldn't save: {e}"))
     }
 }
 
@@ -226,6 +192,8 @@ fn handle_editing_key(setup: &mut Setup, key: KeyEvent) {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
 
     use tokio::sync::mpsc;
@@ -235,9 +203,9 @@ mod tests {
             base_url: "https://maple.atlassian.net".into(),
             email: "maple@maple.example".into(),
             api_token: "maple-token".into(),
-            jql: "project = MAPLE".into(),
             page_size: 25,
             editor: Some("maple".into()),
+            ..Default::default()
         }
     }
 
@@ -284,10 +252,6 @@ mod tests {
 
         s.set_value(SetupField::Token, "  maple-token  ".into());
         assert_eq!(s.draft.api_token, "maple-token");
-
-        // JQL is deliberately left alone - whitespace can be meaningful in a query
-        s.set_value(SetupField::Jql, "  project = MAPLE  ".into());
-        assert_eq!(s.draft.jql, "  project = MAPLE  ");
 
         // a blank editor is None, never Some("") - that would shadow $EDITOR
         s.set_value(SetupField::Editor, "maple".into());
@@ -338,14 +302,13 @@ mod tests {
         assert_eq!(back.base_url, "https://maple.atlassian.net");
         assert_eq!(back.email, "maple@maple.example");
         assert_eq!(back.api_token, "maple-token");
-        assert_eq!(back.jql, "project = MAPLE");
         assert_eq!(back.page_size, 25);
         assert_eq!(back.editor.as_deref(), Some("maple"));
 
         // the file holds an API token, so it must not be group or world readable
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
+            use std::{fs, os::unix::fs::PermissionsExt};
             let mode = fs::metadata(&path).expect("metadata").permissions().mode();
             assert_eq!(mode & 0o777, 0o600, "got {:o}", mode & 0o777);
         }
@@ -354,7 +317,7 @@ mod tests {
         s.save().expect("an overwrite saves");
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
+            use std::{fs, os::unix::fs::PermissionsExt};
             let mode = fs::metadata(&path).expect("metadata").permissions().mode();
             assert_eq!(mode & 0o777, 0o600, "got {:o}", mode & 0o777);
         }

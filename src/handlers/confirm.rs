@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
-    app::{App, Notice},
+    app::{App, DeleteTarget, Notice},
     event::Event,
     fetch,
     jira::client::JiraClient,
@@ -24,9 +24,18 @@ pub(super) fn handle_key(
         _ => return,
     };
 
-    if let Some(key) = deleting {
-        app.set_notice(Notice::Info(format!("Deleting {key}...")));
-        fetch::spawn_delete_issue(client.clone(), tx.clone(), key);
+    match deleting {
+        Some(DeleteTarget::Issue(key)) => {
+            app.set_notice(Notice::Info(format!("Deleting {key}...")));
+            fetch::spawn_delete_issue(client.clone(), tx.clone(), key);
+        }
+        Some(DeleteTarget::Query(i)) => {
+            let active_removed = app.delete_query(i).is_some();
+            if active_removed {
+                super::fetch_list(app, tx, client);
+            }
+        }
+        None => {}
     }
 }
 
@@ -56,7 +65,7 @@ mod tests {
     }
 
     fn pending_key(app: &App) -> Option<&str> {
-        app.confirm_delete.as_ref().map(|d| d.key.as_str())
+        app.pending_delete_key()
     }
 
     fn focused(app: &App) -> bool {

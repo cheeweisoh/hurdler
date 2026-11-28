@@ -1,10 +1,16 @@
 use std::{
     env, error, fmt, fs,
-    io::ErrorKind,
+    io::{self, ErrorKind, Write},
     path::{Path, PathBuf},
 };
 
 use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct JqlQuery {
+    pub name: String,
+    pub jql: String,
+}
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(default)]
@@ -13,10 +19,11 @@ pub struct Config {
     pub email: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub api_token: String,
-    pub jql: String,
     pub page_size: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub editor: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub queries: Vec<JqlQuery>,
 }
 
 impl Default for Config {
@@ -25,10 +32,9 @@ impl Default for Config {
             base_url: String::new(),
             email: String::new(),
             api_token: String::new(),
-            jql: "assignee = currentUser() AND resolution = Unresolved ORDER BY updated DESC"
-                .into(),
             page_size: 50,
             editor: None,
+            queries: Vec::new(),
         }
     }
 }
@@ -39,9 +45,9 @@ impl fmt::Debug for Config {
             .field("base_url", &self.base_url)
             .field("email", &self.email)
             .field("api_token", &"***")
-            .field("jql", &self.jql)
             .field("page_size", &self.page_size)
             .field("editor", &self.editor)
+            .field("queries", &self.queries)
             .finish()
     }
 }
@@ -69,6 +75,22 @@ impl Config {
         Ok(config)
     }
 
+    pub fn save(&self, path: &Path) -> io::Result<()> {
+        let body = toml::to_string_pretty(self).map_err(io::Error::other)?;
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        write_private(path, &body)
+    }
+
+    pub fn save_queries(path: &Path, queries: &[JqlQuery]) -> Result<(), String> {
+        let mut on_disk = Self::read(path).map_err(|e| e.to_string())?;
+        on_disk.queries = queries.to_vec();
+        on_disk
+            .save(path)
+            .map_err(|e| format!("Couldn't save queries: {e}"))
+    }
+
     pub fn load(override_path: Option<&Path>) -> Result<Self, ConfigError> {
         let path = config_path(override_path);
         let mut config = Self::read(&path)?;
@@ -89,9 +111,6 @@ impl Config {
         }
         if let Some(email) = var("JIRA_EMAIL") {
             self.email = email;
-        }
-        if let Some(jql) = var("JIRA_JQL") {
-            self.jql = jql;
         }
     }
 
@@ -130,6 +149,27 @@ pub fn config_path(override_path: Option<&Path>) -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".config"));
     base.join("hurdler").join("config.toml")
+}
+
+fn write_private(path: &Path, text: &str) -> io::Result<()> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+
+    let mut file = options.open(path)?;
+    file.write_all(text.as_bytes())?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -174,7 +214,6 @@ mod tests {
             base_url: "https://maple.atlassian.net".into(),
             email: "maple@maplesyrup.example".into(),
             api_token: "maple-file-token".into(),
-            jql: "project = MAPLE".into(),
             ..Default::default()
         }
     }
@@ -186,14 +225,12 @@ mod tests {
             "JIRA_BASE_URL" => Some("https://maplebush.atlassian.net".into()),
             "JIRA_EMAIL" => Some("maple@maplebush.example".into()),
             "JIRA_API_TOKEN" => Some("maple-env-token".into()),
-            "JIRA_JQL" => Some("project = MAPLEBUSH".into()),
             _ => None,
         });
 
         assert_eq!(config.base_url, "https://maplebush.atlassian.net");
         assert_eq!(config.email, "maple@maplebush.example");
         assert_eq!(config.api_token, "maple-env-token");
-        assert_eq!(config.jql, "project = MAPLEBUSH");
 
         // page_size and editor have no env override and keep the file's values
         assert_eq!(config.page_size, 50);
@@ -209,7 +246,6 @@ mod tests {
         assert_eq!(config.api_token, untouched.api_token);
         assert_eq!(config.base_url, untouched.base_url);
         assert_eq!(config.email, untouched.email);
-        assert_eq!(config.jql, untouched.jql);
 
         // an unset variable is the same no-op
         let mut config = complete();
@@ -230,8 +266,54 @@ mod tests {
         let config = Config::read(&path).expect("a partial file still parses");
         assert_eq!(config.base_url, "https://maple.atlassian.net");
         assert_eq!(config.page_size, 50);
-        assert_eq!(config.jql, Config::default().jql);
         assert_eq!(config.editor, None);
+        assert!(config.queries.is_empty());
+    }
+
+    #[test]
+    fn queries_load_in_file_order() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let many = dir.path().join("maple.toml");
+        fs::write(
+            &many,
+            "base_url = \"https://maple.atlassian.net\"\n\
+             [[queries]]\nname = \"mine\"\njql = \"assignee = currentUser()\"\n\
+             [[queries]]\nname = \"theirs\"\njql = \"assignee != currentUser()\"\n",
+        )
+        .expect("write config");
+
+        // file order is the order the picker shows, so it must survive the round trip
+        let config = Config::read(&many).expect("read config");
+        assert_eq!(
+            config.queries,
+            [
+                JqlQuery {
+                    name: "mine".into(),
+                    jql: "assignee = currentUser()".into(),
+                },
+                JqlQuery {
+                    name: "theirs".into(),
+                    jql: "assignee != currentUser()".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn an_old_jql_key_still_loads_and_saves_no_query() {
+        let dir = tempfile::tempdir().expect("temp dir");
+
+        // a pre-queries config must not fail to parse; its lone jql is simply ignored,
+        // and All Issues is the only built-in list
+        let legacy = dir.path().join("oldmaple.toml");
+        fs::write(&legacy, "jql = \"project = MAPLE\"\n").expect("write config");
+        let config = Config::read(&legacy).expect("read config");
+        assert!(config.queries.is_empty());
+
+        // and the key is dropped the next time the file is written
+        config.save(&legacy).expect("save config");
+        let text = fs::read_to_string(&legacy).expect("read back");
+        assert!(!text.contains("jql"), "{text}");
     }
 
     #[test]
@@ -301,6 +383,49 @@ mod tests {
         assert!(text.contains("***"), "{text}");
         // the fields that are safe to log still show up
         assert!(text.contains("maple@maplesyrup.example"), "{text}");
+    }
+
+    #[test]
+    fn saving_queries_keeps_env_tokens_off_disk() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("maple.toml");
+        // the file deliberately has no api_token: it comes from JIRA_API_TOKEN
+        fs::write(
+            &path,
+            "base_url = \"https://maple.atlassian.net\"\nemail = \"maple@maple.example\"\n",
+        )
+        .expect("write config");
+
+        // the in-memory config the app runs with does hold the env token
+        let mut live = Config::read(&path).expect("read config");
+        live.apply_env(|name| (name == "JIRA_API_TOKEN").then(|| "maple-env-token".into()));
+        assert_eq!(live.api_token, "maple-env-token");
+
+        Config::save_queries(
+            &path,
+            &[JqlQuery {
+                name: "mine".into(),
+                jql: "assignee = currentUser()".into(),
+            }],
+        )
+        .expect("save queries");
+
+        let text = fs::read_to_string(&path).expect("reread config");
+        assert!(!text.contains("maple-env-token"), "{text}");
+        assert!(!text.contains("api_token"), "{text}");
+
+        // and the queries plus the rest of the file survived the round trip
+        let saved = Config::read(&path).expect("reparse config");
+        assert_eq!(
+            saved.queries,
+            [JqlQuery {
+                name: "mine".into(),
+                jql: "assignee = currentUser()".into(),
+            }]
+        );
+        assert_eq!(saved.base_url, "https://maple.atlassian.net");
+        assert_eq!(saved.email, "maple@maple.example");
+        assert_eq!(saved.api_token, "");
     }
 
     #[test]

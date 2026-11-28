@@ -200,7 +200,7 @@ fn wrap_line(text: &str, width: usize, offset: usize) -> Vec<(usize, String)> {
     pieces
 }
 
-fn edit_lines<'a>(
+pub(super) fn edit_lines<'a>(
     label: impl Into<Line<'a>>,
     indent: usize,
     input: &TextInput,

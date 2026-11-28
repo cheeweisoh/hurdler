@@ -46,6 +46,7 @@ pub(super) fn handle_key(
                 load_more_if_needed(app, tx, client);
             }
         }
+        KeyCode::Char('f') if app.active_tab == Tab::Issues => app.open_query_menu(),
         KeyCode::Char('/') if app.active_tab == Tab::Issues => app.open_search(),
         KeyCode::Enter => app.open_inspector(),
         KeyCode::Char('a') if app.active_tab == Tab::Issues => {
@@ -158,10 +159,7 @@ mod tests {
 
         // the pair opens the dialog, which is the only thing that can delete
         press(&mut app, 'd');
-        assert_eq!(
-            app.confirm_delete.as_ref().map(|d| d.key.as_str()),
-            Some("MAPLE-1")
-        );
+        assert_eq!(app.pending_delete_key(), Some("MAPLE-1"));
         assert_eq!(app.issues.items.len(), 2, "the dialog deletes nothing yet");
 
         // d-j-d is not dd

@@ -7,8 +7,8 @@ use crate::{
     config::Config,
     domain::issue::{Choice, FieldChange, Issue, User},
     jira::types::{
-        EditMeta, IssueTypesResponse, LabelPage, RawCreated, RawIssue, RawTransition, RawUser,
-        RawVersion, SearchPage, SearchResponse, TransitionsResponse, create_payload,
+        EditMeta, ErrorBody, IssueTypesResponse, LabelPage, RawCreated, RawIssue, RawTransition,
+        RawUser, RawVersion, SearchPage, SearchResponse, TransitionsResponse, create_payload,
         update_payload,
     },
 };
@@ -44,10 +44,6 @@ impl JiraClient {
         }
     }
 
-    pub fn jql(&self) -> &str {
-        &self.config.jql
-    }
-
     pub fn browse_url(&self, issue_key: &str) -> String {
         format!("{}/browse/{issue_key}", self.config.base_url)
     }
@@ -65,7 +61,13 @@ impl JiraClient {
             return Ok(response);
         }
         let body = response.text().await.unwrap_or_default();
-        bail!("Jira returned {status}: {body}")
+        match serde_json::from_str::<ErrorBody>(&body)
+            .ok()
+            .and_then(|e| e.summary())
+        {
+            Some(message) => bail!("{message}"),
+            None => bail!("Jira returned {status}: {body}"),
+        }
     }
 
     async fn send(&self, request: RequestBuilder) -> Result<Response> {
@@ -118,6 +120,16 @@ impl JiraClient {
 
     pub async fn search(&self, jql: &str) -> Result<Vec<Issue>> {
         self.search_page(jql, None).await.map(|page| page.issues)
+    }
+
+    pub async fn check_jql(&self, jql: &str) -> Result<()> {
+        let body = json!({ "jql": jql, "maxResults": 1 });
+        self.send(
+            self.request(Method::POST, "/rest/api/3/search/jql")
+                .json(&body),
+        )
+        .await
+        .map(|_| ())
     }
 
     pub async fn issue(&self, key: &str) -> Result<Issue> {

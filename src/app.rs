@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeSet, HashSet},
     fmt, io,
+    path::PathBuf,
     time::{Duration, Instant},
 };
 
@@ -8,9 +9,10 @@ use chrono::{Days, Months, NaiveDate};
 use ratatui::widgets::TableState;
 
 use crate::{
+    config::{Config, JqlQuery},
     cycle,
     domain::issue::{DATE_FORMAT, FieldChange, FieldId, FieldKind, FieldValue, Issue, User},
-    jira::search::search_jql,
+    jira::search::{ALL_ISSUES_JQL, ALL_ISSUES_LABEL, search_jql},
     text_input::TextInput,
 };
 
@@ -22,6 +24,7 @@ pub const DRAFT_KEY: &str = "NEW";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Normal,
+    Queries,
     Search,
     Inspect,
     Create,
@@ -34,6 +37,7 @@ impl fmt::Display for Mode {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let name = match self {
             Mode::Normal => "Normal",
+            Mode::Queries => "Queries",
             Mode::Search => "Search",
             Mode::Inspect => "Inspect",
             Mode::Create => "Create",
@@ -132,6 +136,71 @@ impl<T> StatefulTable<T> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FormFocus {
+    #[default]
+    Name,
+    Jql,
+}
+
+#[derive(Debug, Default)]
+pub struct QueryMenu {
+    pub cursor: usize,
+    pub form: Option<QueryForm>,
+}
+
+#[derive(Debug, Default)]
+pub struct QueryForm {
+    pub name: TextInput,
+    pub jql: TextInput,
+    pub focus: FormFocus,
+    pub editing: Option<usize>,
+    pub error: Option<String>,
+    typing: Option<String>,
+}
+
+impl QueryForm {
+    pub fn focused(&self) -> &TextInput {
+        match self.focus {
+            FormFocus::Name => &self.name,
+            FormFocus::Jql => &self.jql,
+        }
+    }
+
+    pub fn focused_input(&mut self) -> &mut TextInput {
+        match self.focus {
+            FormFocus::Name => &mut self.name,
+            FormFocus::Jql => &mut self.jql,
+        }
+    }
+
+    pub fn is_typing(&self) -> bool {
+        self.typing.is_some()
+    }
+
+    pub fn start_edit(&mut self) {
+        self.typing = Some(self.focused().buffer.clone());
+    }
+
+    pub fn finish_edit(&mut self) {
+        self.typing = None;
+    }
+
+    pub fn cancel_edit(&mut self) {
+        if let Some(before) = self.typing.take() {
+            *self.focused_input() = TextInput::new(before);
+        }
+    }
+
+    pub fn toggle_focus(&mut self) {
+        self.finish_edit();
+        self.focus = match self.focus {
+            FormFocus::Name => FormFocus::Jql,
+            FormFocus::Jql => FormFocus::Name,
+        };
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct Search {
     pub input: TextInput,
@@ -176,9 +245,15 @@ pub struct OptionsRequest {
     pub jql: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeleteTarget {
+    Issue(String),
+    Query(usize),
+}
+
 #[derive(Debug)]
 pub struct ConfirmDelete {
-    pub key: String,
+    pub target: DeleteTarget,
     pub confirm_focused: bool,
 }
 
@@ -302,6 +377,11 @@ pub struct App {
     pub active_tab: Tab,
     pub search: Option<Search>,
     pub list_jql: String,
+    pub queries: Vec<JqlQuery>,
+    pub current_query: Option<usize>,
+    pub previous_query: Option<Option<usize>>,
+    pub query_menu: Option<QueryMenu>,
+    pub config_path: PathBuf,
     pub next_page_token: Option<String>,
     pub loading_more: bool,
     pub fetch_generation: u64,
@@ -321,7 +401,6 @@ pub struct App {
     pub pending_key: Option<(char, Instant)>,
 
     pub loading: bool,
-    pub error: Option<String>,
     pub notice: Option<(Notice, Instant)>,
 
     pub show_help: bool,
@@ -341,6 +420,8 @@ impl App {
     pub fn mode(&self) -> Mode {
         if self.confirm_delete.is_some() {
             Mode::Confirm
+        } else if self.query_menu.is_some() {
+            Mode::Queries
         } else if self.picker.is_some() {
             Mode::Pick
         } else if self.search_editing() {
@@ -362,6 +443,145 @@ impl App {
             .map_or(self.account.as_str(), |user| user.display_name.as_str())
     }
 
+    pub fn open_query_menu(&mut self) {
+        let cursor = self.current_query.map_or(0, |i| i + 1);
+        self.query_menu = Some(QueryMenu { cursor, form: None });
+    }
+
+    pub fn move_query_cursor(&mut self, delta: isize) {
+        let rows = self.queries.len() + 1;
+        if let Some(menu) = &mut self.query_menu {
+            menu.cursor = (menu.cursor as isize + delta).rem_euclid(rows as isize) as usize;
+        }
+    }
+
+    pub fn query_under_cursor(&self) -> Option<usize> {
+        let cursor = self.query_menu.as_ref()?.cursor;
+        cursor.checked_sub(1)
+    }
+
+    pub fn start_query_form(&mut self, edit: bool) {
+        let editing = if edit {
+            match self.query_under_cursor() {
+                Some(i) => Some(i),
+                None => return,
+            }
+        } else {
+            None
+        };
+        let (name, jql) = editing
+            .and_then(|i| self.queries.get(i))
+            .map(|q| (q.name.clone(), q.jql.clone()))
+            .unwrap_or_default();
+
+        if let Some(menu) = &mut self.query_menu {
+            menu.form = Some(QueryForm {
+                name: TextInput::new(name),
+                jql: TextInput::new(jql),
+                editing,
+                ..Default::default()
+            });
+        }
+    }
+
+    pub fn query_form_open(&self) -> bool {
+        self.query_menu
+            .as_ref()
+            .is_some_and(|menu| menu.form.is_some())
+    }
+
+    pub fn query_form_typing(&self) -> bool {
+        self.query_form().is_some_and(|form| form.is_typing())
+    }
+
+    pub fn query_form(&self) -> Option<&QueryForm> {
+        self.query_menu.as_ref()?.form.as_ref()
+    }
+
+    pub fn query_form_mut(&mut self) -> Option<&mut QueryForm> {
+        self.query_menu.as_mut()?.form.as_mut()
+    }
+
+    fn validate_query(&self, form: &QueryForm) -> Result<JqlQuery, String> {
+        let name = form.name.buffer.trim();
+        let jql = form.jql.buffer.trim();
+        if name.is_empty() {
+            return Err("Name cannot be empty".into());
+        }
+        if jql.is_empty() {
+            return Err("Query cannot be empty".into());
+        }
+        let taken = self
+            .queries
+            .iter()
+            .enumerate()
+            .any(|(i, q)| Some(i) != form.editing && q.name.eq_ignore_ascii_case(name));
+        if taken {
+            return Err(format!("A query named \"{name}\" already exists"));
+        }
+        Ok(JqlQuery {
+            name: name.to_string(),
+            jql: jql.to_string(),
+        })
+    }
+
+    pub fn submit_query_form(&mut self) -> Option<String> {
+        let form = self.query_menu.as_mut()?.form.take()?;
+        let query = match self.validate_query(&form) {
+            Ok(query) => query,
+            Err(message) => {
+                let menu = self.query_menu.as_mut()?;
+                menu.form = Some(QueryForm {
+                    error: Some(message),
+                    ..form
+                });
+                return None;
+            }
+        };
+
+        let index = match form.editing {
+            Some(i) => {
+                self.queries[i] = query;
+                i
+            }
+            None => {
+                self.queries.push(query);
+                self.queries.len() - 1
+            }
+        };
+        if let Some(menu) = &mut self.query_menu {
+            menu.cursor = index + 1;
+            menu.form = Some(QueryForm {
+                editing: Some(index),
+                error: None,
+                ..form
+            });
+        }
+        self.persist_queries();
+
+        (self.current_query == Some(index)).then(|| {
+            self.search = None;
+            self.list_jql = self.base_jql().to_string();
+            self.list_jql.clone()
+        })
+    }
+
+    fn persist_queries(&mut self) {
+        if let Err(message) = Config::save_queries(&self.config_path, &self.queries) {
+            self.set_notice(Notice::Error(message));
+        }
+    }
+
+    pub fn close_query_form(&mut self) {
+        if let Some(menu) = &mut self.query_menu {
+            menu.form = None;
+        }
+    }
+
+    pub fn close_query_menu(&mut self) {
+        self.query_menu = None;
+    }
+
     pub fn search_editing(&self) -> bool {
         self.search.as_ref().is_some_and(|search| search.editing)
     }
@@ -371,6 +591,36 @@ impl App {
             .as_ref()
             .map(|search| search.active_query.as_str())
             .filter(|query| !query.is_empty())
+    }
+
+    pub fn ask_delete_query(&mut self) {
+        if let Some(i) = self.query_under_cursor() {
+            self.confirm_delete = Some(ConfirmDelete {
+                target: DeleteTarget::Query(i),
+                confirm_focused: false,
+            });
+        }
+    }
+
+    pub fn delete_query(&mut self, i: usize) -> Option<String> {
+        if i >= self.queries.len() {
+            return None;
+        }
+        let removed = self.queries.remove(i);
+        self.persist_queries();
+        self.set_notice(Notice::Info(format!("Deleted query {}", removed.name)));
+
+        if let Some(menu) = &mut self.query_menu {
+            menu.cursor = menu.cursor.min(self.queries.len());
+        }
+        match self.current_query {
+            Some(active) if active == i => self.select_query(None),
+            Some(active) if active > i => {
+                self.current_query = Some(active - 1);
+                None
+            }
+            _ => None,
+        }
     }
 
     pub fn open_search(&mut self) {
@@ -389,8 +639,20 @@ impl App {
         }
     }
 
-    pub fn clear_search(&mut self, base_jql: &str) -> bool {
-        self.list_jql = base_jql.to_string();
+    pub fn base_jql(&self) -> &str {
+        self.current_query
+            .and_then(|i| self.queries.get(i))
+            .map_or(ALL_ISSUES_JQL, |q| q.jql.as_str())
+    }
+
+    pub fn query_label(&self) -> &str {
+        self.current_query
+            .and_then(|i| self.queries.get(i))
+            .map_or(ALL_ISSUES_LABEL, |q| q.name.as_str())
+    }
+
+    pub fn clear_search(&mut self) -> bool {
+        self.list_jql = self.base_jql().to_string();
         let Some(search) = self.search.take() else {
             return false;
         };
@@ -408,11 +670,12 @@ impl App {
         self.issues.state.select(stash.selected);
         self.next_page_token = stash.next_page_token;
         self.details_scroll = 0;
-        self.error = None;
+        self.previous_query = None;
         false
     }
 
-    pub fn due_search(&mut self, base_jql: &str) -> Option<String> {
+    pub fn due_search(&mut self) -> Option<String> {
+        let base_jql = self.base_jql().to_string();
         let search = self.search.as_mut()?;
         let changed_at = search.changed_at?;
         if search.editing && changed_at.elapsed() < SEARCH_DELAY {
@@ -438,7 +701,7 @@ impl App {
             }
         }
 
-        let jql = search_jql(base_jql, &query).unwrap_or_else(|| base_jql.to_string());
+        let jql = search_jql(&base_jql, &query).unwrap_or(base_jql);
         self.list_jql = jql.clone();
         Some(jql)
     }
@@ -463,7 +726,7 @@ impl App {
         self.issues = StatefulTable::new(issues);
         self.next_page_token = next_page_token;
         self.loading = false;
-        self.error = None;
+        self.previous_query = None;
         self.details_scroll = 0;
     }
 
@@ -472,7 +735,25 @@ impl App {
             return;
         }
         self.loading = false;
-        self.error = Some(message);
+        let failed = self.query_label().to_string();
+        if let Some(previous) = self.previous_query.take() {
+            self.current_query = previous;
+            self.list_jql = self.base_jql().to_string();
+        }
+        self.set_notice(Notice::Error(format!("{failed}: {message}")));
+    }
+
+    pub fn select_query(&mut self, choice: Option<usize>) -> Option<String> {
+        if choice == self.current_query {
+            return None;
+        }
+        self.previous_query = Some(self.current_query);
+        self.current_query = choice;
+        self.search = None;
+        self.list_jql = self.base_jql().to_string();
+        self.issues.state.select(Some(0));
+        self.details_scroll = 0;
+        Some(self.list_jql.clone())
     }
 
     pub fn request_more(&mut self) -> Option<(String, u64)> {
@@ -620,7 +901,7 @@ impl App {
     pub fn ask_delete(&mut self) {
         if let Some(key) = self.selected_issue_key().filter(|key| !self.is_draft(key)) {
             self.confirm_delete = Some(ConfirmDelete {
-                key,
+                target: DeleteTarget::Issue(key),
                 confirm_focused: false,
             });
         }
@@ -642,11 +923,11 @@ impl App {
         }
     }
 
-    pub fn take_delete(&mut self) -> Option<String> {
-        self.confirm_delete.take().map(|dialog| dialog.key)
+    pub fn take_delete(&mut self) -> Option<DeleteTarget> {
+        self.confirm_delete.take().map(|dialog| dialog.target)
     }
 
-    pub fn press_delete_button(&mut self) -> Option<String> {
+    pub fn press_delete_button(&mut self) -> Option<DeleteTarget> {
         if !self.confirm_delete.as_ref()?.confirm_focused {
             self.confirm_delete = None;
             return None;
@@ -1030,6 +1311,32 @@ impl App {
     pub(crate) fn picker_mut(&mut self) -> &mut Picker {
         self.picker.as_mut().expect("the picker is open")
     }
+
+    pub(crate) fn menu(&self) -> &QueryMenu {
+        self.query_menu.as_ref().expect("the query menu is open")
+    }
+
+    pub(crate) fn form(&self) -> &QueryForm {
+        self.menu().form.as_ref().expect("the query form is open")
+    }
+
+    pub(crate) fn set_form(&mut self, name: &str, jql: &str) {
+        let form = self
+            .query_menu
+            .as_mut()
+            .and_then(|menu| menu.form.as_mut())
+            .expect("the query form is open");
+        form.name = TextInput::new(name.into());
+        form.jql = TextInput::new(jql.into());
+        form.finish_edit();
+    }
+
+    pub(crate) fn pending_delete_key(&self) -> Option<&str> {
+        match &self.confirm_delete.as_ref()?.target {
+            DeleteTarget::Issue(key) => Some(key),
+            DeleteTarget::Query(_) => None,
+        }
+    }
 }
 
 fn parse_edit(field: FieldId, text: &str) -> Result<FieldValue, String> {
@@ -1286,11 +1593,15 @@ mod tests {
 
         app.fail_refresh("boom".into(), stale);
         assert!(app.loading, "the newer fetch is still in flight");
-        assert_eq!(app.error, None);
+        assert!(app.notice.is_none());
 
         app.fail_refresh("boom".into(), current);
         assert!(!app.loading);
-        assert_eq!(app.error.as_deref(), Some("boom"));
+        assert!(
+            matches!(&app.notice, Some((Notice::Error(m), _)) if m.ends_with("boom")),
+            "{:?}",
+            app.notice
+        );
 
         app.loading_more = true;
         app.fail_more("boom".into(), stale);
@@ -1333,6 +1644,38 @@ mod tests {
             issues: StatefulTable::new(vec![issue]),
             ..Default::default()
         }
+    }
+
+    fn query(name: &str, jql: &str) -> JqlQuery {
+        JqlQuery {
+            name: name.into(),
+            jql: jql.into(),
+        }
+    }
+
+    // saving a query rewrites the config file, so these tests need a real one
+    fn app_with_saved_queries(dir: &tempfile::TempDir) -> App {
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "base_url = \"https://maple.atlassian.net\"\n")
+            .expect("write config");
+
+        let mut app = app_with_issue();
+        app.config_path = path;
+        app.queries = vec![
+            query("Maple", "project = MAPLE"),
+            query("Birch", "project = BIRCH"),
+        ];
+        app.current_query = Some(0);
+        app.list_jql = app.base_jql().to_string();
+        app
+    }
+
+    fn use_base(app: &mut App, jql: &str) {
+        app.queries = vec![JqlQuery {
+            name: "Maple".into(),
+            jql: jql.into(),
+        }];
+        app.current_query = Some(0);
     }
 
     fn status_option(id: &str, name: &str) -> PickerOption {
@@ -1862,7 +2205,7 @@ mod tests {
 
         app.ask_delete();
         let dialog = app.confirm_delete.as_ref().expect("the dialog is open");
-        assert_eq!(dialog.key, "MAPLE-1");
+        assert_eq!(dialog.target, DeleteTarget::Issue("MAPLE-1".into()));
         assert!(!dialog.confirm_focused, "Cancel holds focus on open");
         assert_eq!(app.mode(), Mode::Confirm, "the dialog owns the keyboard");
 
@@ -1878,7 +2221,10 @@ mod tests {
         // confirming hands the key over exactly once
         app.ask_delete();
         app.focus_delete_button(true);
-        assert_eq!(app.press_delete_button().as_deref(), Some("MAPLE-1"));
+        assert_eq!(
+            app.press_delete_button(),
+            Some(DeleteTarget::Issue("MAPLE-1".into()))
+        );
         assert_eq!(
             app.press_delete_button(),
             None,
@@ -1935,7 +2281,7 @@ mod tests {
     fn a_search_runs_once_typing_pauses() {
         const BASE: &str = "project = MAPLE ORDER BY updated DESC";
         let mut app = app_with_issue();
-        app.list_jql = BASE.into();
+        use_base(&mut app, BASE);
 
         app.open_search();
         assert_eq!(app.mode(), Mode::Search);
@@ -1943,13 +2289,13 @@ mod tests {
             app.edit_search(c);
         }
         assert!(
-            app.due_search(BASE).is_none(),
+            app.due_search().is_none(),
             "mid-typing the delay has not run out"
         );
 
         // the delay backdated rather than slept through
         app.search.as_mut().unwrap().changed_at = Some(Instant::now() - Duration::from_millis(400));
-        let jql = app.due_search(BASE).expect("the pause fires the search");
+        let jql = app.due_search().expect("the pause fires the search");
         assert!(jql.contains("text ~ \"login*\""), "{jql}");
         assert!(jql.ends_with("ORDER BY updated DESC"), "{jql}");
         assert_eq!(app.list_jql, jql, "further pages follow the search");
@@ -1957,7 +2303,7 @@ mod tests {
 
         // the same text does not fire a second request
         app.search.as_mut().unwrap().changed_at = Some(Instant::now() - Duration::from_millis(400));
-        assert!(app.due_search(BASE).is_none());
+        assert!(app.due_search().is_none());
 
         // Enter keeps the results and leaves the bar
         app.close_search_input();
@@ -1970,7 +2316,7 @@ mod tests {
         app.search.as_mut().unwrap().input.clear();
         app.edit_search('a');
         app.search.as_mut().unwrap().changed_at = Some(Instant::now() - Duration::from_millis(400));
-        assert_eq!(app.due_search(BASE).as_deref(), Some(BASE));
+        assert_eq!(app.due_search().as_deref(), Some(BASE));
         assert_eq!(app.search_query(), Some("a"));
     }
 
@@ -1978,16 +2324,17 @@ mod tests {
     fn enter_sends_a_pending_search_without_waiting_out_the_delay() {
         const BASE: &str = "project = MAPLE";
         let mut app = app_with_issue();
+        use_base(&mut app, BASE);
 
         app.open_search();
         for c in "login".chars() {
             app.edit_search(c);
         }
-        assert!(app.due_search(BASE).is_none(), "still typing");
+        assert!(app.due_search().is_none(), "still typing");
 
         // Enter means "I am done", so the queued search goes on the next tick
         app.close_search_input();
-        let jql = app.due_search(BASE).expect("Enter does not wait");
+        let jql = app.due_search().expect("Enter does not wait");
         assert!(jql.contains("text ~ \"login*\""), "{jql}");
     }
 
@@ -1995,6 +2342,7 @@ mod tests {
     fn esc_puts_the_old_list_back_without_a_round_trip() {
         const BASE: &str = "project = MAPLE";
         let mut app = app_with_issue();
+        use_base(&mut app, BASE);
         app.issues.items.push(Issue {
             key: "MAPLE-2".into(),
             summary: "birch".into(),
@@ -2006,7 +2354,7 @@ mod tests {
 
         // opening the bar and pressing Esc right away costs no request
         app.open_search();
-        assert!(!app.clear_search(BASE));
+        assert!(!app.clear_search());
         assert!(app.search.is_none());
         assert_eq!(app.list_jql, BASE);
 
@@ -2014,7 +2362,7 @@ mod tests {
         app.edit_search('x');
         app.edit_search('y');
         app.search.as_mut().unwrap().changed_at = Some(Instant::now() - Duration::from_millis(400));
-        app.due_search(BASE).expect("a search ran");
+        app.due_search().expect("a search ran");
         assert_ne!(app.list_jql, BASE);
 
         // the search lands, replacing the list it was launched from
@@ -2030,7 +2378,7 @@ mod tests {
         assert_eq!(app.issues.items.len(), 1);
 
         assert!(
-            !app.clear_search(BASE),
+            !app.clear_search(),
             "the old list is already in hand, so no fetch"
         );
         assert_eq!(
@@ -2058,6 +2406,289 @@ mod tests {
         // proof of that: the in-flight result is dropped
         app.finish_refresh(vec![], None, generation);
         assert_eq!(app.issues.items.len(), 2);
+    }
+
+    #[test]
+    fn switching_queries_drops_the_search_and_starts_from_page_one() {
+        const MAPLE: &str = "project = MAPLE";
+        const BIRCH: &str = "project = BIRCH";
+        let mut app = app_with_issue();
+        app.queries = vec![
+            JqlQuery {
+                name: "Maple".into(),
+                jql: MAPLE.into(),
+            },
+            JqlQuery {
+                name: "Birch".into(),
+                jql: BIRCH.into(),
+            },
+        ];
+        app.current_query = Some(0);
+        app.issues.items.push(Issue {
+            key: "MAPLE-2".into(),
+            ..Default::default()
+        });
+        app.issues.state.select(Some(1));
+
+        // a search is running over the Maple query, with a page still to come
+        app.open_search();
+        app.edit_search('x');
+        app.search.as_mut().unwrap().changed_at = Some(Instant::now() - Duration::from_millis(400));
+        app.due_search().expect("a search ran");
+        app.next_page_token = Some("maple-page-2".into());
+
+        // re-picking the query already on screen costs no request
+        assert!(app.select_query(Some(0)).is_none());
+        assert!(app.search.is_some(), "and leaves the search alone");
+
+        let jql = app
+            .select_query(Some(1))
+            .expect("another query is another fetch");
+        assert_eq!(jql, BIRCH);
+        assert_eq!(app.list_jql, BIRCH, "further pages follow the new query");
+        assert_eq!(app.query_label(), "Birch");
+        assert!(
+            app.search.is_none(),
+            "the search bar goes with the old list"
+        );
+        assert_eq!(app.search_query(), None);
+        assert_eq!(app.issues.state.selected(), Some(0));
+
+        // the fetch that follows starts at page one: the old query's token is gone,
+        // and nothing can page while it is in flight
+        app.begin_refresh();
+        assert_eq!(app.next_page_token, None);
+        assert!(app.request_more().is_none());
+
+        // Esc with no search open is a no-op that keeps the new query's list
+        assert!(!app.clear_search());
+        assert_eq!(app.list_jql, BIRCH);
+    }
+
+    #[test]
+    fn the_query_menu_opens_on_the_active_row_and_wraps() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut app = app_with_saved_queries(&dir);
+        app.current_query = Some(1);
+
+        app.open_query_menu();
+        assert_eq!(app.mode(), Mode::Queries, "the menu owns the keyboard");
+        assert_eq!(
+            app.menu().cursor,
+            2,
+            "the menu opens on the query being shown, below the All Issues row"
+        );
+        assert_eq!(app.query_under_cursor(), Some(1));
+
+        // three rows - All Issues, Maple, Birch - and both ends wrap
+        app.move_query_cursor(1);
+        assert_eq!(app.menu().cursor, 0);
+        assert_eq!(
+            app.query_under_cursor(),
+            None,
+            "row 0 is the built-in list, not a saved query"
+        );
+        app.move_query_cursor(-1);
+        assert_eq!(app.menu().cursor, 2, "and back the other way");
+
+        // the built-in list is not something you can delete
+        app.move_query_cursor(1);
+        app.ask_delete_query();
+        assert!(app.confirm_delete.is_none());
+
+        app.close_query_menu();
+        assert!(app.query_menu.is_none());
+        assert_eq!(app.mode(), Mode::Normal);
+    }
+
+    #[test]
+    fn a_new_query_is_validated_before_it_is_saved() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut app = app_with_saved_queries(&dir);
+        app.open_query_menu();
+
+        app.start_query_form(false);
+        assert!(app.query_form_open(), "the form takes the keyboard");
+        let form = app.form();
+        assert!(form.name.buffer.is_empty() && form.jql.buffer.is_empty());
+        assert_eq!(form.editing, None, "a is an add, not an edit");
+
+        // every rejection keeps the form open with its complaint, and saves nothing
+        for (name, jql, message) in [
+            ("", "project = OAK", "Name cannot be empty"),
+            ("Oak", "   ", "Query cannot be empty"),
+            ("maple", "project = OAK", "already exists"),
+        ] {
+            app.set_form(name, jql);
+            assert_eq!(app.submit_query_form(), None);
+            let error = app.form().error.as_deref().expect("the form stays open");
+            assert!(error.contains(message), "{error}");
+            assert_eq!(app.queries.len(), 2, "and nothing is saved");
+        }
+
+        // a filled-in form is trimmed, appended, and the cursor follows it
+        app.set_form("  Oak  ", "  project = OAK  ");
+        assert_eq!(
+            app.submit_query_form(),
+            None,
+            "the new query is not the one on screen, so nothing is refetched"
+        );
+        assert!(app.query_form_open(), "the form stays open to keep editing");
+        assert_eq!(app.queries[2], query("Oak", "project = OAK"));
+        assert_eq!(app.menu().cursor, 3);
+        assert_eq!(
+            app.form().editing,
+            Some(2),
+            "and now edits what it saved, so a second save adds nothing"
+        );
+        assert_eq!(app.submit_query_form(), None);
+        assert_eq!(app.queries.len(), 3);
+        assert_eq!(
+            app.form().error,
+            None,
+            "re-saving its own name is not a clash"
+        );
+
+        // and it is on disk, not just in memory
+        let saved = Config::read(&app.config_path).expect("read config").queries;
+        assert_eq!(saved, app.queries);
+
+        // a config that cannot be written says so rather than losing the query quietly
+        app.config_path = dir.path().join("gone").join("config.toml");
+        app.close_query_form();
+        app.start_query_form(false);
+        app.set_form("Pine", "project = PINE");
+        app.submit_query_form();
+        assert_eq!(
+            app.queries.len(),
+            4,
+            "the query is still usable this session"
+        );
+        assert!(
+            matches!(&app.notice, Some((Notice::Error(_), _))),
+            "{:?}",
+            app.notice
+        );
+    }
+
+    #[test]
+    fn a_query_jira_rejects_is_not_the_one_left_on_screen() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut app = app_with_saved_queries(&dir);
+
+        // applying a query whose JQL Jira rejects names it and keeps Maple on screen
+        app.select_query(Some(1)).expect("another query is a fetch");
+        let generation = app.begin_refresh();
+        app.fail_refresh("bad JQL".into(), generation);
+        assert!(
+            matches!(&app.notice, Some((Notice::Error(m), _)) if m == "Birch: bad JQL"),
+            "the status bar names the query that failed: {:?}",
+            app.notice
+        );
+        assert_eq!(app.current_query, Some(0), "Birch is not what is shown");
+        assert_eq!(app.list_jql, "project = MAPLE", "and paging follows Maple");
+
+        // once a query has loaded, a later failure is no reason to switch away from it
+        app.select_query(Some(1)).expect("another fetch");
+        let generation = app.begin_refresh();
+        app.finish_refresh(vec![], None, generation);
+        let generation = app.begin_refresh();
+        app.fail_refresh("boom".into(), generation);
+        assert_eq!(app.current_query, Some(1));
+        assert_eq!(app.list_jql, "project = BIRCH");
+    }
+
+    #[test]
+    fn editing_the_active_query_refetches_with_the_new_jql() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut app = app_with_saved_queries(&dir);
+        app.open_search();
+        app.open_query_menu();
+        assert_eq!(app.menu().cursor, 1, "Maple is the query on screen");
+
+        app.start_query_form(true);
+        let form = app.form();
+        assert_eq!(form.name.buffer, "Maple", "e opens the row filled in");
+        assert_eq!(form.jql.buffer, "project = MAPLE");
+        assert_eq!(form.editing, Some(0));
+
+        // a query may keep its own name - only the others are taken
+        app.set_form("Maple", "project = MAPLE AND resolution = Unresolved");
+        let jql = app
+            .submit_query_form()
+            .expect("the list has to follow the query it is showing");
+        assert_eq!(jql, "project = MAPLE AND resolution = Unresolved");
+        assert_eq!(app.list_jql, jql, "further pages follow the new JQL");
+        assert_eq!(app.base_jql(), jql);
+        assert_eq!(app.queries.len(), 2, "an edit replaces, never appends");
+        assert!(app.search.is_none(), "a search over the old JQL is dropped");
+        assert_eq!(app.menu().cursor, 1);
+        assert_eq!(
+            Config::read(&app.config_path).expect("read config").queries,
+            app.queries
+        );
+
+        // Esc is what leaves the form, and the menu is still underneath
+        app.close_query_form();
+        assert!(!app.query_form_open());
+        assert!(app.query_menu.is_some());
+
+        // e on the All Issues row has nothing to edit
+        app.move_query_cursor(-1);
+        app.start_query_form(true);
+        assert!(!app.query_form_open());
+    }
+
+    #[test]
+    fn deleting_a_query_keeps_the_cursor_and_the_active_query_in_step() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut app = app_with_saved_queries(&dir);
+        app.queries.push(query("Oak", "project = OAK"));
+        app.current_query = Some(2);
+        app.list_jql = app.base_jql().to_string();
+        app.open_query_menu();
+        assert_eq!(app.menu().cursor, 3);
+
+        assert_eq!(
+            app.delete_query(9),
+            None,
+            "an index past the end is a no-op"
+        );
+        assert_eq!(app.queries.len(), 3);
+
+        // dropping a query above the one on screen only shifts it down
+        assert_eq!(
+            app.delete_query(0),
+            None,
+            "the list on screen is untouched, so no refetch"
+        );
+        assert_eq!(app.current_query, Some(1));
+        assert_eq!(
+            app.base_jql(),
+            "project = OAK",
+            "Oak is still what is shown"
+        );
+        assert_eq!(app.menu().cursor, 2, "the cursor stays on Oak");
+        assert_eq!(app.query_under_cursor(), app.current_query);
+
+        // dropping the one on screen falls back to All Issues, which needs a fetch
+        let jql = app
+            .delete_query(1)
+            .expect("the list it was showing is gone");
+        assert_eq!(jql, ALL_ISSUES_JQL);
+        assert_eq!(app.current_query, None);
+        assert_eq!(app.list_jql, ALL_ISSUES_JQL);
+        assert_eq!(
+            app.menu().cursor,
+            1,
+            "the cursor clamps to the shorter list"
+        );
+        assert_eq!(app.queries, [query("Birch", "project = BIRCH")]);
+        assert_eq!(
+            Config::read(&app.config_path).expect("read config").queries,
+            app.queries,
+            "the file loses it too"
+        );
     }
 
     #[test]

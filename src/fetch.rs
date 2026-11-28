@@ -52,6 +52,17 @@ pub fn spawn_fetch_issues(
     });
 }
 
+pub fn spawn_check_jql(client: JiraClient, tx: UnboundedSender<Event>, name: String, jql: String) {
+    tokio::spawn(async move {
+        if let Err(e) = client.check_jql(&jql).await {
+            let _ = tx.send(Event::QueryCheckFailed {
+                name,
+                message: format!("{e:#}"),
+            });
+        }
+    });
+}
+
 pub fn spawn_fetch_more(
     client: JiraClient,
     tx: UnboundedSender<Event>,
