@@ -7,8 +7,8 @@ use crate::{
     config::Config,
     domain::issue::{Choice, FieldChange, Issue, User},
     jira::types::{
-        EditMeta, IssueTypesResponse, LabelPage, RawCreated, RawIssue, RawTransition, RawUser,
-        RawVersion, SearchPage, SearchResponse, TransitionsResponse, create_payload,
+        EditMeta, ErrorBody, IssueTypesResponse, LabelPage, RawCreated, RawIssue, RawTransition,
+        RawUser, RawVersion, SearchPage, SearchResponse, TransitionsResponse, create_payload,
         update_payload,
     },
 };
@@ -65,7 +65,13 @@ impl JiraClient {
             return Ok(response);
         }
         let body = response.text().await.unwrap_or_default();
-        bail!("Jira returned {status}: {body}")
+        match serde_json::from_str::<ErrorBody>(&body)
+            .ok()
+            .and_then(|e| e.summary())
+        {
+            Some(message) => bail!("{message}"),
+            None => bail!("Jira returned {status}: {body}"),
+        }
     }
 
     async fn send(&self, request: RequestBuilder) -> Result<Response> {

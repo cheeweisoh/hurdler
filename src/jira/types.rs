@@ -5,6 +5,25 @@ use serde_json::{Value, json};
 use super::adf::{self, AdfNode};
 use crate::domain::issue::{Choice, FieldId, FieldValue, Issue, User};
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ErrorBody {
+    pub error_messages: Vec<String>,
+    pub errors: std::collections::BTreeMap<String, String>,
+}
+
+impl ErrorBody {
+    pub fn summary(&self) -> Option<String> {
+        let parts: Vec<&str> = self
+            .error_messages
+            .iter()
+            .map(String::as_str)
+            .chain(self.errors.values().map(String::as_str))
+            .collect();
+        (!parts.is_empty()).then(|| parts.join("; "))
+    }
+}
+
 pub struct SearchPage {
     pub issues: Vec<Issue>,
     pub next_page_token: Option<String>,
