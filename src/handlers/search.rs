@@ -1,12 +1,11 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::{app::App, event::Event, fetch, jira::client::JiraClient};
+use crate::{app::App, event::Event, jira::client::JiraClient};
 
 pub(super) fn clear(app: &mut App, tx: &UnboundedSender<Event>, client: &JiraClient) {
-    if app.clear_search(client.jql()) {
-        let generation = app.begin_refresh();
-        fetch::spawn_fetch_issues(client.clone(), tx.clone(), app.list_jql.clone(), generation);
+    if app.clear_search() {
+        super::fetch_list(app, tx, client);
     }
 }
 

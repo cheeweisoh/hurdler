@@ -10,16 +10,14 @@ pub enum SetupField {
     BaseUrl,
     Email,
     Token,
-    Jql,
     Editor,
 }
 
 impl SetupField {
-    pub const ALL: [SetupField; 5] = [
+    pub const ALL: [SetupField; 4] = [
         SetupField::BaseUrl,
         SetupField::Email,
         SetupField::Token,
-        SetupField::Jql,
         SetupField::Editor,
     ];
 
@@ -28,7 +26,6 @@ impl SetupField {
             SetupField::BaseUrl => "Jira URL",
             SetupField::Email => "Email",
             SetupField::Token => "API Token",
-            SetupField::Jql => "Default JQL",
             SetupField::Editor => "Editor",
         }
     }
@@ -63,7 +60,6 @@ impl Setup {
             SetupField::BaseUrl => self.draft.base_url.clone(),
             SetupField::Email => self.draft.email.clone(),
             SetupField::Token => self.draft.api_token.clone(),
-            SetupField::Jql => self.draft.jql.clone(),
             SetupField::Editor => self.draft.editor.clone().unwrap_or_default(),
         }
     }
@@ -75,7 +71,6 @@ impl Setup {
             }
             SetupField::Email => self.draft.email = text.trim().to_string(),
             SetupField::Token => self.draft.api_token = text.trim().to_string(),
-            SetupField::Jql => self.draft.jql = text,
             SetupField::Editor => self.draft.editor = (!text.trim().is_empty()).then_some(text),
         }
     }
@@ -208,9 +203,9 @@ mod tests {
             base_url: "https://maple.atlassian.net".into(),
             email: "maple@maple.example".into(),
             api_token: "maple-token".into(),
-            jql: "project = MAPLE".into(),
             page_size: 25,
             editor: Some("maple".into()),
+            ..Default::default()
         }
     }
 
@@ -257,10 +252,6 @@ mod tests {
 
         s.set_value(SetupField::Token, "  maple-token  ".into());
         assert_eq!(s.draft.api_token, "maple-token");
-
-        // JQL is deliberately left alone - whitespace can be meaningful in a query
-        s.set_value(SetupField::Jql, "  project = MAPLE  ".into());
-        assert_eq!(s.draft.jql, "  project = MAPLE  ");
 
         // a blank editor is None, never Some("") - that would shadow $EDITOR
         s.set_value(SetupField::Editor, "maple".into());
@@ -311,7 +302,6 @@ mod tests {
         assert_eq!(back.base_url, "https://maple.atlassian.net");
         assert_eq!(back.email, "maple@maple.example");
         assert_eq!(back.api_token, "maple-token");
-        assert_eq!(back.jql, "project = MAPLE");
         assert_eq!(back.page_size, 25);
         assert_eq!(back.editor.as_deref(), Some("maple"));
 

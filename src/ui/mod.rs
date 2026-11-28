@@ -5,6 +5,7 @@ mod help;
 mod helpers;
 mod issues;
 mod picker;
+mod queries;
 pub mod setup;
 
 use chrono::{Local, Utc};
@@ -13,7 +14,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::Style,
     text::{Line, Span},
-    widgets::{List, ListItem, Paragraph, Wrap},
+    widgets::{List, ListItem},
 };
 
 use crate::app::{App, Notice, Search, Tab, View};
@@ -46,6 +47,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     picker::render_picker(frame, main_area, app);
     date_picker::render_date_picker(frame, main_area, today, app);
+    queries::render_queries(frame, main_area, app);
     confirm::render_confirm(frame, main_area, app);
     help::render_help(frame, frame.area(), app);
 }
@@ -69,6 +71,17 @@ fn search_line(search: &Search) -> Line<'static> {
 }
 
 fn render_header(frame: &mut Frame, area: Rect, app: &App) {
+    let query = Line::from(Span::styled(
+        format!(" ▾ {} ", app.query_label()),
+        Style::new().fg(THEME.accent).bold(),
+    ));
+    let [query_area, area] = Layout::horizontal([
+        Constraint::Length(query.width() as u16),
+        Constraint::Fill(1),
+    ])
+    .areas(area);
+    frame.render_widget(query, query_area);
+
     let area = match &app.search {
         Some(search) => {
             let line = search_line(search);
@@ -111,16 +124,6 @@ fn render_sidebar(frame: &mut Frame, area: Rect, app: &App) {
 
 fn render_content(frame: &mut Frame, area: Rect, app: &mut App) {
     match app.active_tab {
-        Tab::Issues => {
-            if let Some(error) = &app.error {
-                let body = Paragraph::new(error.as_str())
-                    .style(Style::new().fg(THEME.red))
-                    .wrap(Wrap { trim: false })
-                    .block(helpers::pane_block("Issues", true));
-                frame.render_widget(body, area);
-            } else {
-                issues::render_issues_table(frame, area, app);
-            }
-        }
+        Tab::Issues => issues::render_issues_table(frame, area, app),
     }
 }

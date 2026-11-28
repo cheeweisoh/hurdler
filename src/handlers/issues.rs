@@ -46,6 +46,7 @@ pub(super) fn handle_key(
                 load_more_if_needed(app, tx, client);
             }
         }
+        KeyCode::Char('f') if app.active_tab == Tab::Issues => app.open_query_menu(),
         KeyCode::Char('/') if app.active_tab == Tab::Issues => app.open_search(),
         KeyCode::Enter => app.open_inspector(),
         KeyCode::Char('a') if app.active_tab == Tab::Issues => {

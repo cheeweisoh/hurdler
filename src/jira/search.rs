@@ -1,3 +1,6 @@
+pub const ALL_ISSUES_LABEL: &str = "All Issues";
+pub const ALL_ISSUES_JQL: &str = "updated <= 365d ORDER BY updated DESC";
+
 pub fn search_jql(base: &str, query: &str) -> Option<String> {
     let clauses: Vec<String> = query.split_whitespace().filter_map(word_clause).collect();
     if clauses.is_empty() {

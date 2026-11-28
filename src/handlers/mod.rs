@@ -4,6 +4,7 @@ mod editing;
 mod inspector;
 mod issues;
 mod picker;
+mod queries;
 mod search;
 
 use std::time::Duration;
@@ -43,6 +44,18 @@ pub(crate) fn handle_key(
         return;
     }
 
+    if app.show_help {
+        if matches!(key.code, KeyCode::Esc | KeyCode::Char('?')) {
+            app.show_help = false;
+        }
+        return;
+    }
+
+    if key.code == KeyCode::Char('?') && !typing {
+        app.show_help = true;
+        return;
+    }
+
     if app.picker.is_some() {
         picker::handle_key(app, key, tx, client);
         return;
@@ -58,15 +71,8 @@ pub(crate) fn handle_key(
         return;
     }
 
-    if app.show_help {
-        if matches!(key.code, KeyCode::Esc | KeyCode::Char('?')) {
-            app.show_help = false;
-        }
-        return;
-    }
-
-    if key.code == KeyCode::Char('?') && app.editing.is_none() && !app.search_editing() {
-        app.show_help = true;
+    if app.query_menu.is_some() {
+        queries::handle_key(app, key, tx, client);
         return;
     }
 
@@ -89,13 +95,15 @@ pub(crate) fn handle_key(
         KeyCode::Esc if app.search.is_some() => search::clear(app, tx, client),
         KeyCode::Tab => app.active_tab = app.active_tab.next(),
         KeyCode::BackTab => app.active_tab = app.active_tab.prev(),
-        KeyCode::Char('r') if !app.loading => {
-            let generation = app.begin_refresh();
-            fetch::spawn_fetch_issues(client.clone(), tx.clone(), app.list_jql.clone(), generation);
-        }
+        KeyCode::Char('r') if !app.loading => fetch_list(app, tx, client),
         _ if app.active_tab == Tab::Issues => issues::handle_key(app, key, tx, client, pending),
         _ => {}
     }
+}
+
+fn fetch_list(app: &mut App, tx: &UnboundedSender<Event>, client: &JiraClient) {
+    let generation = app.begin_refresh();
+    fetch::spawn_fetch_issues(client.clone(), tx.clone(), app.list_jql.clone(), generation);
 }
 
 fn save_change(app: &App, tx: &UnboundedSender<Event>, client: &JiraClient, change: FieldChange) {
@@ -139,7 +147,6 @@ mod tests {
         let client = JiraClient::new(Config {
             base_url: "http://localhost".into(),
             email: "nobody@example.com".into(),
-            jql: String::new(),
             api_token: String::new(),
             ..Default::default()
         });
@@ -166,6 +173,29 @@ mod tests {
             ..Default::default()
         });
         (app, client)
+    }
+
+    #[tokio::test]
+    async fn question_mark_opens_help_over_whatever_is_on_screen() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (mut app, client) = app_and_client();
+        let press = |app: &mut App, code| handle_key(app, KeyEvent::from(code), &tx, &client);
+
+        // the saved queries are a layer of their own, and help has to reach over it
+        app.open_query_menu();
+        press(&mut app, KeyCode::Char('?'));
+        assert!(app.show_help);
+        assert!(
+            app.query_menu.is_some(),
+            "help does not close what it covers"
+        );
+
+        // and Esc answers the help, not the menu underneath
+        press(&mut app, KeyCode::Esc);
+        assert!(!app.show_help);
+        assert!(app.query_menu.is_some());
+        press(&mut app, KeyCode::Esc);
+        assert!(app.query_menu.is_none(), "the next Esc reaches the menu");
     }
 
     #[tokio::test]

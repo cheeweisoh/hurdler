@@ -44,10 +44,6 @@ impl JiraClient {
         }
     }
 
-    pub fn jql(&self) -> &str {
-        &self.config.jql
-    }
-
     pub fn browse_url(&self, issue_key: &str) -> String {
         format!("{}/browse/{issue_key}", self.config.base_url)
     }

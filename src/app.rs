@@ -8,9 +8,10 @@ use chrono::{Days, Months, NaiveDate};
 use ratatui::widgets::TableState;
 
 use crate::{
+    config::JqlQuery,
     cycle,
     domain::issue::{DATE_FORMAT, FieldChange, FieldId, FieldKind, FieldValue, Issue, User},
-    jira::search::search_jql,
+    jira::search::{ALL_ISSUES_JQL, ALL_ISSUES_LABEL, search_jql},
     text_input::TextInput,
 };
 
@@ -22,6 +23,7 @@ pub const DRAFT_KEY: &str = "NEW";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Normal,
+    Queries,
     Search,
     Inspect,
     Create,
@@ -34,6 +36,7 @@ impl fmt::Display for Mode {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let name = match self {
             Mode::Normal => "Normal",
+            Mode::Queries => "Queries",
             Mode::Search => "Search",
             Mode::Inspect => "Inspect",
             Mode::Create => "Create",
@@ -130,6 +133,11 @@ impl<T> StatefulTable<T> {
         }
         self.state.select(Some(self.items.len() - 1));
     }
+}
+
+#[derive(Debug, Default)]
+pub struct QueryMenu {
+    pub cursor: usize,
 }
 
 #[derive(Debug, Default)]
@@ -302,6 +310,10 @@ pub struct App {
     pub active_tab: Tab,
     pub search: Option<Search>,
     pub list_jql: String,
+    pub queries: Vec<JqlQuery>,
+    pub current_query: Option<usize>,
+    pub previous_query: Option<Option<usize>>,
+    pub query_menu: Option<QueryMenu>,
     pub next_page_token: Option<String>,
     pub loading_more: bool,
     pub fetch_generation: u64,
@@ -321,7 +333,6 @@ pub struct App {
     pub pending_key: Option<(char, Instant)>,
 
     pub loading: bool,
-    pub error: Option<String>,
     pub notice: Option<(Notice, Instant)>,
 
     pub show_help: bool,
@@ -341,6 +352,8 @@ impl App {
     pub fn mode(&self) -> Mode {
         if self.confirm_delete.is_some() {
             Mode::Confirm
+        } else if self.query_menu.is_some() {
+            Mode::Queries
         } else if self.picker.is_some() {
             Mode::Pick
         } else if self.search_editing() {
@@ -360,6 +373,27 @@ impl App {
         self.me
             .as_ref()
             .map_or(self.account.as_str(), |user| user.display_name.as_str())
+    }
+
+    pub fn open_query_menu(&mut self) {
+        let cursor = self.current_query.map_or(0, |i| i + 1);
+        self.query_menu = Some(QueryMenu { cursor });
+    }
+
+    pub fn move_query_cursor(&mut self, delta: isize) {
+        let rows = self.queries.len() + 1;
+        if let Some(menu) = &mut self.query_menu {
+            menu.cursor = (menu.cursor as isize + delta).rem_euclid(rows as isize) as usize;
+        }
+    }
+
+    pub fn query_under_cursor(&self) -> Option<usize> {
+        let cursor = self.query_menu.as_ref()?.cursor;
+        cursor.checked_sub(1)
+    }
+
+    pub fn close_query_menu(&mut self) {
+        self.query_menu = None;
     }
 
     pub fn search_editing(&self) -> bool {
@@ -389,8 +423,20 @@ impl App {
         }
     }
 
-    pub fn clear_search(&mut self, base_jql: &str) -> bool {
-        self.list_jql = base_jql.to_string();
+    pub fn base_jql(&self) -> &str {
+        self.current_query
+            .and_then(|i| self.queries.get(i))
+            .map_or(ALL_ISSUES_JQL, |q| q.jql.as_str())
+    }
+
+    pub fn query_label(&self) -> &str {
+        self.current_query
+            .and_then(|i| self.queries.get(i))
+            .map_or(ALL_ISSUES_LABEL, |q| q.name.as_str())
+    }
+
+    pub fn clear_search(&mut self) -> bool {
+        self.list_jql = self.base_jql().to_string();
         let Some(search) = self.search.take() else {
             return false;
         };
@@ -408,11 +454,12 @@ impl App {
         self.issues.state.select(stash.selected);
         self.next_page_token = stash.next_page_token;
         self.details_scroll = 0;
-        self.error = None;
+        self.previous_query = None;
         false
     }
 
-    pub fn due_search(&mut self, base_jql: &str) -> Option<String> {
+    pub fn due_search(&mut self) -> Option<String> {
+        let base_jql = self.base_jql().to_string();
         let search = self.search.as_mut()?;
         let changed_at = search.changed_at?;
         if search.editing && changed_at.elapsed() < SEARCH_DELAY {
@@ -438,7 +485,7 @@ impl App {
             }
         }
 
-        let jql = search_jql(base_jql, &query).unwrap_or_else(|| base_jql.to_string());
+        let jql = search_jql(&base_jql, &query).unwrap_or(base_jql);
         self.list_jql = jql.clone();
         Some(jql)
     }
@@ -463,7 +510,7 @@ impl App {
         self.issues = StatefulTable::new(issues);
         self.next_page_token = next_page_token;
         self.loading = false;
-        self.error = None;
+        self.previous_query = None;
         self.details_scroll = 0;
     }
 
@@ -472,7 +519,25 @@ impl App {
             return;
         }
         self.loading = false;
-        self.error = Some(message);
+        let failed = self.query_label().to_string();
+        if let Some(previous) = self.previous_query.take() {
+            self.current_query = previous;
+            self.list_jql = self.base_jql().to_string();
+        }
+        self.set_notice(Notice::Error(format!("{failed}: {message}")));
+    }
+
+    pub fn select_query(&mut self, choice: Option<usize>) -> Option<String> {
+        if choice == self.current_query {
+            return None;
+        }
+        self.previous_query = Some(self.current_query);
+        self.current_query = choice;
+        self.search = None;
+        self.list_jql = self.base_jql().to_string();
+        self.issues.state.select(Some(0));
+        self.details_scroll = 0;
+        Some(self.list_jql.clone())
     }
 
     pub fn request_more(&mut self) -> Option<(String, u64)> {
@@ -1030,6 +1095,10 @@ impl App {
     pub(crate) fn picker_mut(&mut self) -> &mut Picker {
         self.picker.as_mut().expect("the picker is open")
     }
+
+    pub(crate) fn menu(&self) -> &QueryMenu {
+        self.query_menu.as_ref().expect("the query menu is open")
+    }
 }
 
 fn parse_edit(field: FieldId, text: &str) -> Result<FieldValue, String> {
@@ -1286,11 +1355,15 @@ mod tests {
 
         app.fail_refresh("boom".into(), stale);
         assert!(app.loading, "the newer fetch is still in flight");
-        assert_eq!(app.error, None);
+        assert!(app.notice.is_none());
 
         app.fail_refresh("boom".into(), current);
         assert!(!app.loading);
-        assert_eq!(app.error.as_deref(), Some("boom"));
+        assert!(
+            matches!(&app.notice, Some((Notice::Error(m), _)) if m.ends_with("boom")),
+            "{:?}",
+            app.notice
+        );
 
         app.loading_more = true;
         app.fail_more("boom".into(), stale);
@@ -1333,6 +1406,32 @@ mod tests {
             issues: StatefulTable::new(vec![issue]),
             ..Default::default()
         }
+    }
+
+    fn query(name: &str, jql: &str) -> JqlQuery {
+        JqlQuery {
+            name: name.into(),
+            jql: jql.into(),
+        }
+    }
+
+    fn app_with_queries() -> App {
+        let mut app = app_with_issue();
+        app.queries = vec![
+            query("Maple", "project = MAPLE"),
+            query("Birch", "project = BIRCH"),
+        ];
+        app.current_query = Some(0);
+        app.list_jql = app.base_jql().to_string();
+        app
+    }
+
+    fn use_base(app: &mut App, jql: &str) {
+        app.queries = vec![JqlQuery {
+            name: "Maple".into(),
+            jql: jql.into(),
+        }];
+        app.current_query = Some(0);
     }
 
     fn status_option(id: &str, name: &str) -> PickerOption {
@@ -1935,7 +2034,7 @@ mod tests {
     fn a_search_runs_once_typing_pauses() {
         const BASE: &str = "project = MAPLE ORDER BY updated DESC";
         let mut app = app_with_issue();
-        app.list_jql = BASE.into();
+        use_base(&mut app, BASE);
 
         app.open_search();
         assert_eq!(app.mode(), Mode::Search);
@@ -1943,13 +2042,13 @@ mod tests {
             app.edit_search(c);
         }
         assert!(
-            app.due_search(BASE).is_none(),
+            app.due_search().is_none(),
             "mid-typing the delay has not run out"
         );
 
         // the delay backdated rather than slept through
         app.search.as_mut().unwrap().changed_at = Some(Instant::now() - Duration::from_millis(400));
-        let jql = app.due_search(BASE).expect("the pause fires the search");
+        let jql = app.due_search().expect("the pause fires the search");
         assert!(jql.contains("text ~ \"login*\""), "{jql}");
         assert!(jql.ends_with("ORDER BY updated DESC"), "{jql}");
         assert_eq!(app.list_jql, jql, "further pages follow the search");
@@ -1957,7 +2056,7 @@ mod tests {
 
         // the same text does not fire a second request
         app.search.as_mut().unwrap().changed_at = Some(Instant::now() - Duration::from_millis(400));
-        assert!(app.due_search(BASE).is_none());
+        assert!(app.due_search().is_none());
 
         // Enter keeps the results and leaves the bar
         app.close_search_input();
@@ -1970,7 +2069,7 @@ mod tests {
         app.search.as_mut().unwrap().input.clear();
         app.edit_search('a');
         app.search.as_mut().unwrap().changed_at = Some(Instant::now() - Duration::from_millis(400));
-        assert_eq!(app.due_search(BASE).as_deref(), Some(BASE));
+        assert_eq!(app.due_search().as_deref(), Some(BASE));
         assert_eq!(app.search_query(), Some("a"));
     }
 
@@ -1978,16 +2077,17 @@ mod tests {
     fn enter_sends_a_pending_search_without_waiting_out_the_delay() {
         const BASE: &str = "project = MAPLE";
         let mut app = app_with_issue();
+        use_base(&mut app, BASE);
 
         app.open_search();
         for c in "login".chars() {
             app.edit_search(c);
         }
-        assert!(app.due_search(BASE).is_none(), "still typing");
+        assert!(app.due_search().is_none(), "still typing");
 
         // Enter means "I am done", so the queued search goes on the next tick
         app.close_search_input();
-        let jql = app.due_search(BASE).expect("Enter does not wait");
+        let jql = app.due_search().expect("Enter does not wait");
         assert!(jql.contains("text ~ \"login*\""), "{jql}");
     }
 
@@ -1995,6 +2095,7 @@ mod tests {
     fn esc_puts_the_old_list_back_without_a_round_trip() {
         const BASE: &str = "project = MAPLE";
         let mut app = app_with_issue();
+        use_base(&mut app, BASE);
         app.issues.items.push(Issue {
             key: "MAPLE-2".into(),
             summary: "birch".into(),
@@ -2006,7 +2107,7 @@ mod tests {
 
         // opening the bar and pressing Esc right away costs no request
         app.open_search();
-        assert!(!app.clear_search(BASE));
+        assert!(!app.clear_search());
         assert!(app.search.is_none());
         assert_eq!(app.list_jql, BASE);
 
@@ -2014,7 +2115,7 @@ mod tests {
         app.edit_search('x');
         app.edit_search('y');
         app.search.as_mut().unwrap().changed_at = Some(Instant::now() - Duration::from_millis(400));
-        app.due_search(BASE).expect("a search ran");
+        app.due_search().expect("a search ran");
         assert_ne!(app.list_jql, BASE);
 
         // the search lands, replacing the list it was launched from
@@ -2030,7 +2131,7 @@ mod tests {
         assert_eq!(app.issues.items.len(), 1);
 
         assert!(
-            !app.clear_search(BASE),
+            !app.clear_search(),
             "the old list is already in hand, so no fetch"
         );
         assert_eq!(
@@ -2058,6 +2159,121 @@ mod tests {
         // proof of that: the in-flight result is dropped
         app.finish_refresh(vec![], None, generation);
         assert_eq!(app.issues.items.len(), 2);
+    }
+
+    #[test]
+    fn switching_queries_drops_the_search_and_starts_from_page_one() {
+        const MAPLE: &str = "project = MAPLE";
+        const BIRCH: &str = "project = BIRCH";
+        let mut app = app_with_issue();
+        app.queries = vec![
+            JqlQuery {
+                name: "Maple".into(),
+                jql: MAPLE.into(),
+            },
+            JqlQuery {
+                name: "Birch".into(),
+                jql: BIRCH.into(),
+            },
+        ];
+        app.current_query = Some(0);
+        app.issues.items.push(Issue {
+            key: "MAPLE-2".into(),
+            ..Default::default()
+        });
+        app.issues.state.select(Some(1));
+
+        // a search is running over the Maple query, with a page still to come
+        app.open_search();
+        app.edit_search('x');
+        app.search.as_mut().unwrap().changed_at = Some(Instant::now() - Duration::from_millis(400));
+        app.due_search().expect("a search ran");
+        app.next_page_token = Some("maple-page-2".into());
+
+        // re-picking the query already on screen costs no request
+        assert!(app.select_query(Some(0)).is_none());
+        assert!(app.search.is_some(), "and leaves the search alone");
+
+        let jql = app
+            .select_query(Some(1))
+            .expect("another query is another fetch");
+        assert_eq!(jql, BIRCH);
+        assert_eq!(app.list_jql, BIRCH, "further pages follow the new query");
+        assert_eq!(app.query_label(), "Birch");
+        assert!(
+            app.search.is_none(),
+            "the search bar goes with the old list"
+        );
+        assert_eq!(app.search_query(), None);
+        assert_eq!(app.issues.state.selected(), Some(0));
+
+        // the fetch that follows starts at page one: the old query's token is gone,
+        // and nothing can page while it is in flight
+        app.begin_refresh();
+        assert_eq!(app.next_page_token, None);
+        assert!(app.request_more().is_none());
+
+        // Esc with no search open is a no-op that keeps the new query's list
+        assert!(!app.clear_search());
+        assert_eq!(app.list_jql, BIRCH);
+    }
+
+    #[test]
+    fn the_query_menu_opens_on_the_active_row_and_wraps() {
+        let mut app = app_with_queries();
+        app.current_query = Some(1);
+
+        app.open_query_menu();
+        assert_eq!(app.mode(), Mode::Queries, "the menu owns the keyboard");
+        assert_eq!(
+            app.menu().cursor,
+            2,
+            "the menu opens on the query being shown, below the All Issues row"
+        );
+        assert_eq!(app.query_under_cursor(), Some(1));
+
+        // three rows - All Issues, Maple, Birch - and both ends wrap
+        app.move_query_cursor(1);
+        assert_eq!(app.menu().cursor, 0);
+        assert_eq!(
+            app.query_under_cursor(),
+            None,
+            "row 0 is the built-in list, not a saved query"
+        );
+        app.move_query_cursor(-1);
+        assert_eq!(app.menu().cursor, 2, "and back the other way");
+
+        app.move_query_cursor(1);
+
+        app.close_query_menu();
+        assert!(app.query_menu.is_none());
+        assert_eq!(app.mode(), Mode::Normal);
+    }
+
+    #[test]
+    fn a_query_jira_rejects_is_not_the_one_left_on_screen() {
+        let mut app = app_with_queries();
+
+        // applying a query whose JQL Jira rejects names it and keeps Maple on screen
+        app.select_query(Some(1)).expect("another query is a fetch");
+        let generation = app.begin_refresh();
+        app.fail_refresh("bad JQL".into(), generation);
+        assert!(
+            matches!(&app.notice, Some((Notice::Error(m), _)) if m == "Birch: bad JQL"),
+            "the status bar names the query that failed: {:?}",
+            app.notice
+        );
+        assert_eq!(app.current_query, Some(0), "Birch is not what is shown");
+        assert_eq!(app.list_jql, "project = MAPLE", "and paging follows Maple");
+
+        // once a query has loaded, a later failure is no reason to switch away from it
+        app.select_query(Some(1)).expect("another fetch");
+        let generation = app.begin_refresh();
+        app.finish_refresh(vec![], None, generation);
+        let generation = app.begin_refresh();
+        app.fail_refresh("boom".into(), generation);
+        assert_eq!(app.current_query, Some(1));
+        assert_eq!(app.list_jql, "project = BIRCH");
     }
 
     #[test]

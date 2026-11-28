@@ -109,13 +109,14 @@ async fn run_setup(terminal: &mut DefaultTerminal, path: PathBuf) -> anyhow::Res
 async fn run(terminal: &mut DefaultTerminal, config: Config) -> anyhow::Result<()> {
     let mut app = App::new();
     app.account = config.email.clone();
+    app.queries = config.queries.clone();
 
     let editor = config.editor.clone();
     let client = JiraClient::new(config);
     let mut events = EventHandler::new(Duration::from_millis(100));
     let tx = events.sender();
 
-    app.list_jql = client.jql().to_string();
+    app.list_jql = app.base_jql().to_string();
     let generation = app.begin_refresh();
     fetch::spawn_fetch_issues(client.clone(), tx.clone(), app.list_jql.clone(), generation);
     fetch::spawn_fetch_me(client.clone(), tx.clone());
@@ -130,7 +131,7 @@ async fn run(terminal: &mut DefaultTerminal, config: Config) -> anyhow::Result<(
         match event {
             Event::Tick => {
                 app.expire_notice();
-                if let Some(jql) = app.due_search(client.jql()) {
+                if let Some(jql) = app.due_search() {
                     let generation = app.begin_refresh();
                     fetch::spawn_fetch_issues(client.clone(), tx.clone(), jql, generation);
                 }

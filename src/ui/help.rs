@@ -17,6 +17,7 @@ const KEY_WIDTH: usize = 12;
 fn help_entries(mode: Mode) -> &'static [(&'static str, &'static str)] {
     match mode {
         Mode::Normal => &[
+            ("f", "pick a saved query"),
             ("j / k", "move between issues"),
             ("gg / G", "first / last issue"),
             ("Enter", "open issue"),
@@ -27,6 +28,11 @@ fn help_entries(mode: Mode) -> &'static [(&'static str, &'static str)] {
             ("Esc", "clear search"),
             ("r", "refresh"),
             ("q", "quit"),
+        ],
+        Mode::Queries => &[
+            ("j / k", "move between queries"),
+            ("Enter / Spc", "apply the selected query"),
+            ("Esc", "close the list"),
         ],
         Mode::Search => &[
             ("type", "search every issue in Jira"),
